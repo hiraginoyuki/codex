@@ -305,6 +305,83 @@ fn build_tool_call_normalizes_default_function_and_custom_namespaces() -> anyhow
     Ok(())
 }
 
+#[test]
+fn build_tool_call_strips_flat_mcp_name_when_namespace_is_set() {
+    // The OpenAI Responses API can emit the call as
+    // `{ namespace: "mcp__<server>", name: "mcp__<server>__<tool>" }` instead
+    // of the canonical `{ namespace: "mcp__<server>", name: "<tool>" }`.
+    // The router must strip the namespace prefix so the registry lookup
+    // matches the canonical ToolName; otherwise we get the
+    // `unsupported call: mcp__<server>__<tool>` failure from issue #22970.
+    let call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
+        id: None,
+        name: "mcp__codex_apps__gmail_get_recent_emails".to_string(),
+        namespace: Some("mcp__codex_apps__gmail".to_string()),
+        arguments: "{}".to_string(),
+        encrypted_function_args: None,
+        call_id: "call-flat-with-namespace".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    })
+    .expect("function_call should produce a tool call")
+    .expect("function_call should produce a tool call");
+
+    assert_eq!(
+        call.tool_name,
+        ToolName::namespaced("mcp__codex_apps__gmail", "get_recent_emails")
+    );
+}
+
+#[test]
+fn build_tool_call_strips_flat_mcp_name_with_trailing_namespace_delimiter() {
+    // Canonical MCP namespaces already end with the `__` separator
+    // (`qualified_mcp_tool_name_prefix` returns `mcp__<server>__`), so a
+    // Responses API call against a real MCP tool can arrive as
+    // `{ namespace: "mcp__<server>__", name: "mcp__<server>__<tool>" }`
+    // where the first `__` belongs to the namespace, not the separator.
+    // The router must still strip down to the bare tool name, otherwise
+    // the dispatch reports `unsupported call: mcp__<server>__<tool>`
+    // (the exact failure from issue #22970).
+    let call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
+        id: None,
+        name: "mcp__gmail__get_recent_emails".to_string(),
+        namespace: Some("mcp__gmail__".to_string()),
+        arguments: "{}".to_string(),
+        encrypted_function_args: None,
+        call_id: "call-canonical-flat".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    })
+    .expect("function_call should produce a tool call")
+    .expect("function_call should produce a tool call");
+
+    assert_eq!(
+        call.tool_name,
+        ToolName::namespaced("mcp__gmail__", "get_recent_emails")
+    );
+}
+
+#[test]
+fn build_tool_call_keeps_unrelated_name_when_namespace_is_set() {
+    // Sanity check: if the name does not begin with `namespace + "__"` we
+    // must not strip anything, otherwise the existing test
+    // `build_tool_call_uses_namespace_for_registry_name` would regress.
+    let call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
+        id: None,
+        name: "create_event".to_string(),
+        namespace: Some("mcp__codex_apps__calendar".to_string()),
+        arguments: "{}".to_string(),
+        encrypted_function_args: None,
+        call_id: "call-clean".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    })
+    .expect("function_call should produce a tool call")
+    .expect("function_call should produce a tool call");
+
+    assert_eq!(
+        call.tool_name,
+        ToolName::namespaced("mcp__codex_apps__calendar", "create_event")
+    );
+}
+
 #[tokio::test]
 async fn mcp_parallel_support_uses_handler_data() -> anyhow::Result<()> {
     let (_, turn) = make_session_and_context().await;

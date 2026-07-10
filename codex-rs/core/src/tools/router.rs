@@ -161,6 +161,7 @@ impl ToolRouter {
                 call_id,
                 ..
             } => {
+                let name = normalize_mcp_name(namespace.as_deref(), name);
                 let tool_name = ToolName::new(namespace, name).with_default_namespace();
                 Ok(Some(ToolCall {
                     tool_name,
@@ -288,6 +289,37 @@ impl ToolRouter {
             .dispatch_any_with_terminal_outcome(invocation, terminal_outcome_reached)
             .await
     }
+}
+
+/// Strip a `mcp__<server>[sep]<tool>` prefix from a function-call `name`
+/// when the model returns the flat MCP tool name alongside the namespace,
+/// as the OpenAI Responses API (and several custom providers) can do.
+///
+/// Without this normalization the registry lookup misses and the router
+/// reports `unsupported call: mcp__<server>__<tool>` (issue #22970). The
+/// canonical MCP namespace already ends with the `__` separator
+/// (`qualified_mcp_tool_name_prefix` returns `mcp__<server>__`), so we
+/// also try the trailing-underscore-trimmed namespace — that is what
+/// catches the canonical wire form `{ namespace: "mcp__<server>__",
+/// name: "mcp__<server>__<tool>" }`.
+fn normalize_mcp_name(namespace: Option<&str>, name: String) -> String {
+    let Some(namespace) = namespace else {
+        return name;
+    };
+    if namespace.is_empty() {
+        return name;
+    }
+    for namespace_candidate in [namespace, namespace.trim_end_matches('_')] {
+        for separator in ["__", "_"] {
+            let mut prefix = String::with_capacity(namespace_candidate.len() + separator.len());
+            prefix.push_str(namespace_candidate);
+            prefix.push_str(separator);
+            if let Some(stripped) = name.strip_prefix(&prefix) {
+                return stripped.to_string();
+            }
+        }
+    }
+    name
 }
 
 #[cfg(test)]

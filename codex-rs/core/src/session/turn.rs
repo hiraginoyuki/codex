@@ -1329,6 +1329,37 @@ pub(crate) fn build_prompt(
     }
 }
 
+/// Drop any `function_call` or `custom_tool_call` items in `input` whose
+/// `arguments` / `input` string is not valid JSON. Returns the number of
+/// items dropped.
+///
+/// Some upstreams reject a request when it contains such an item, returning
+/// HTTP 400 with `code: "invalid_prompt"` and a message of the form
+/// `"invalid params, invalid function arguments json string,
+/// tool_call_id: …"`. Codex stores the bad call in history (with a synthetic
+/// `function_call_output` from client-side parsing) and re-sends it on every
+/// turn, which permanently poisons the conversation. Stripping the bad
+/// call from the request body before it leaves codex is a low-risk
+/// recovery path: the corresponding `function_call_output` (if any) is
+/// left in place so the model still sees that the call was rejected and
+/// can adjust on its next turn.
+fn sanitize_input_arguments(input: &mut Vec<ResponseItem>) -> usize {
+    let before = input.len();
+    input.retain(|item| match item {
+        // `FunctionCall.arguments` is the standard Responses-API tool call
+        // envelope: a JSON-encoded object string. Validate it.
+        ResponseItem::FunctionCall { arguments, .. } => {
+            serde_json::from_str::<serde_json::Value>(arguments).is_ok()
+        }
+        // `CustomToolCall.input` is intentionally freeform (e.g. apply_patch
+        // raw patch text). The custom-tool handler is responsible for its
+        // own validation, so do not drop it here.
+        ResponseItem::CustomToolCall { .. } => true,
+        _ => true,
+    });
+    before - input.len()
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(deprecated)]
 #[instrument(level = "trace",
@@ -1382,11 +1413,22 @@ async fn run_sampling_request(
         {
             codex_protocol::models::bound_executed_tool_calls_for_prompt(&mut prompt_input);
         }
-        let prompt = build_prompt(
+        let mut prompt = build_prompt(
             prompt_input,
             step_context.as_ref(),
             base_instructions.clone(),
         );
+        // Strip any function_call / custom_tool_call items whose arguments
+        // string is not valid JSON. Some upstreams (e.g. the MiniMax backend)
+        // return HTTP 400 invalid_prompt when such items are present in the
+        // input, and the bad item would otherwise be re-sent on every turn
+        // until the conversation is reset.
+        let dropped = sanitize_input_arguments(&mut prompt.input);
+        if dropped > 0 {
+            tracing::warn!(
+                "dropped {dropped} function_call item(s) with invalid arguments from prompt input"
+            );
+        }
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),

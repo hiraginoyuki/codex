@@ -445,9 +445,30 @@ impl ToolRegistry {
     }
 
     pub(crate) fn tool(&self, name: &ToolName) -> Option<Arc<dyn CoreToolRuntime>> {
-        self.tools
-            .get(&name.clone().with_default_namespace())
-            .map(|tool| Arc::clone(&tool.runtime))
+        let canonical_name = name.clone().with_default_namespace();
+        if let Some(tool) = self.tools.get(&canonical_name) {
+            return Some(Arc::clone(&tool.runtime));
+        }
+        // Fallback for custom model providers that flatten the MCP namespace
+        // back into the function-call name (chat-completions style, or a
+        // Responses backend that emits the legacy shape). The router
+        // canonicalizes namespace-less calls to `functions`, so accept all
+        // default-namespace spellings here and look up the matching namespaced
+        // tool by its canonical flat form.
+        if name.is_default_namespace() {
+            let request_flat = &name.name;
+            let candidate = self
+                .tools
+                .keys()
+                .find(|registered| matches_flat_mcp_name(registered, request_flat));
+            if let Some(registered) = candidate {
+                return self
+                    .tools
+                    .get(registered)
+                    .map(|tool| Arc::clone(&tool.runtime));
+            }
+        }
+        None
     }
 
     #[cfg(test)]
@@ -853,6 +874,23 @@ fn unsupported_tool_call_message(payload: &ToolPayload, tool_name: &ToolName) ->
         _ => format!("unsupported call: {tool_name}"),
     }
 }
+
+/// Returns true when the registered `ToolName` represents the same MCP
+/// tool as the request's flat `mcp__<server>__<tool>` name. This mirrors
+/// the formatting in `codex_mcp::tools` (and the legacy `join_tool_name`
+/// helper in the MCP handler) so a chat-completions style call can be
+/// matched against the namespaced tool that the registry actually stores.
+fn matches_flat_mcp_name(registered: &ToolName, request_flat: &str) -> bool {
+    let Some(namespace) = registered.namespace.as_deref() else {
+        return registered.name == request_flat;
+    };
+    // Mirrors `join_tool_name` in `handlers/mcp.rs` so the chat-completions
+    // flat form matches the canonical wire form.
+    let namespace = namespace.trim_end_matches('_');
+    let name = registered.name.trim_start_matches('_');
+    format!("{namespace}__{name}") == request_flat
+}
+
 #[cfg(test)]
 #[path = "registry_tests.rs"]
 mod tests;

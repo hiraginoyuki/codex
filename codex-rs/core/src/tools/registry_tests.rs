@@ -429,6 +429,62 @@ async fn readiness_selects_exact_tool_with_registry_owned_exposure() {
     );
 }
 
+#[test]
+fn handler_looks_up_namespaced_tools_by_flat_mcp_name() {
+    // Chat-completions style MCP calls (or custom providers that flatten the
+    // namespace back into the function name) arrive as a single
+    // `mcp__<server>__<tool>` name with no namespace. The registry must
+    // resolve these to the canonical namespaced handler; otherwise the
+    // dispatch path reports `unsupported call: mcp__<server>__<tool>`.
+    let namespace = "mcp__codex_apps__gmail";
+    let tool_name = "gmail_get_recent_emails";
+    let flat_name = format!("{namespace}__{tool_name}");
+    let namespaced_name = codex_tools::ToolName::namespaced(namespace, tool_name);
+    let namespaced_handler = Arc::new(TestHandler {
+        tool_name: namespaced_name,
+    }) as Arc<dyn CoreToolRuntime>;
+    let registry = ToolRegistry::from_tools([Arc::clone(&namespaced_handler)]);
+
+    for request in [
+        codex_tools::ToolName::plain(flat_name.clone()),
+        codex_tools::ToolName::namespaced(DEFAULT_FUNCTION_NAMESPACE, flat_name),
+    ] {
+        let resolved = registry.tool(&request);
+        assert!(
+            resolved
+                .as_ref()
+                .is_some_and(|handler| Arc::ptr_eq(handler, &namespaced_handler)),
+            "flat mcp__<server>__<tool> name should resolve to the namespaced handler"
+        );
+    }
+}
+
+#[test]
+fn handler_flat_lookup_does_not_match_unrelated_names() {
+    // Sanity check: the flat-name fallback must only match names that come
+    // from a real registered (namespace, name) pair, not unrelated plain
+    // tool names that happen to share a substring.
+    let namespaced_name = codex_tools::ToolName::namespaced("mcp__codex_apps__gmail", "send");
+    let namespaced_handler = Arc::new(TestHandler {
+        tool_name: namespaced_name,
+    }) as Arc<dyn CoreToolRuntime>;
+    let plain_handler = Arc::new(TestHandler {
+        tool_name: codex_tools::ToolName::plain("send_email"),
+    }) as Arc<dyn CoreToolRuntime>;
+    let registry = ToolRegistry::from_tools([namespaced_handler, plain_handler]);
+
+    // A plain name that does not start with the namespaced server prefix
+    // must not pick up the namespaced handler.
+    let unrelated = registry.tool(&codex_tools::ToolName::plain("send_email"));
+    assert!(unrelated.is_some());
+
+    let misrouted = registry.tool(&codex_tools::ToolName::plain("mcp__codex_apps__gmail"));
+    assert!(
+        misrouted.is_none(),
+        "a flat name that equals a namespace (no tool suffix) must not resolve"
+    );
+}
+
 #[tokio::test]
 async fn function_tools_expose_default_hook_payloads_and_rewrites() -> anyhow::Result<()> {
     let (session, turn) = crate::session::tests::make_session_and_context().await;

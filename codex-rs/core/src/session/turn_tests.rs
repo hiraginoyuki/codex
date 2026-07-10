@@ -86,3 +86,105 @@ async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
         Some("plan contributed assistant text")
     );
 }
+
+#[test]
+fn sanitize_input_arguments_drops_malformed_function_calls() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+
+    fn fc(call_id: &str, args: &str) -> ResponseItem {
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: args.to_string(),
+            encrypted_function_args: None,
+            call_id: call_id.to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn custom(call_id: &str, name: &str, input: &str) -> ResponseItem {
+        ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            namespace: None,
+            input: input.to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn fco(call_id: &str, body: &str) -> ResponseItem {
+        use codex_protocol::models::FunctionCallOutputPayload;
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: call_id.to_string(),
+            output: FunctionCallOutputPayload::from_text(body.to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    let mut input: Vec<ResponseItem> = vec![
+        // A regular user message — must be kept untouched.
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "yo".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        // A healthy function_call (arguments parse as JSON).
+        fc("call_function_ok_1", r#"{"cmd":"ls -la"}"#),
+        // A truncated function_call (the turn-1 MiniMax failure shape).
+        fc(
+            "call_function_bad_2",
+            r#"{"cmd": "lsappinfo list 2>/dev/null | head", "justification": "x", "justification": "#,
+        ),
+        // A synthetic function_call_output for the bad call — must survive.
+        fco("call_function_bad_2", "err: invalid JSON in arguments"),
+        // A healthy custom_tool_call (apply_patch is freeform text, not
+        // JSON) — must be kept even though its input is not valid JSON.
+        custom(
+            "call_function_ok_3",
+            "apply_patch",
+            "*** Begin Patch
+*** End Patch",
+        ),
+    ];
+
+    let dropped = sanitize_input_arguments(&mut input);
+    assert_eq!(
+        dropped, 1,
+        "expected to drop the one malformed function_call"
+    );
+
+    // Remaining items, in order:
+    //  0: user message
+    //  1: healthy function_call
+    //  2: synthetic function_call_output for the dropped call
+    //  3: healthy custom_tool_call (kept as-is; not validated)
+    assert_eq!(input.len(), 4);
+    assert!(matches!(input[0], ResponseItem::Message { .. }));
+    match &input[1] {
+        ResponseItem::FunctionCall { call_id, .. } => {
+            assert_eq!(call_id, "call_function_ok_1");
+        }
+        other => panic!("expected healthy FunctionCall at [1], got {other:?}"),
+    }
+    match &input[2] {
+        ResponseItem::FunctionCallOutput { call_id, .. } => {
+            assert_eq!(call_id, "call_function_bad_2");
+        }
+        other => panic!("expected synthetic FunctionCallOutput at [2], got {other:?}"),
+    }
+    match &input[3] {
+        ResponseItem::CustomToolCall { call_id, .. } => {
+            assert_eq!(call_id, "call_function_ok_3");
+        }
+        other => panic!("expected healthy CustomToolCall at [3], got {other:?}"),
+    }
+}
