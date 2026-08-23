@@ -14,26 +14,31 @@
 let
   isAarch64Darwin = stdenv.hostPlatform.isAarch64 && stdenv.hostPlatform.isDarwin;
 
-  # The v8 crate (rusty_v8) downloads its prebuilt static lib from GitHub at
-  # build time. The nix sandbox blocks that download (no deno/python/curl in
-  # PATH, no network), so we pre-fetch the archive and stage it in the cache
-  # path the build script checks first (~/.cargo/.rusty_v8/<sanitized-url>).
-  # See v8-150.4.0/build.rs::replace_non_alphanumeric and the early
-  # `home::cargo_home().join(".rusty_v8")` cache lookup in the same file.
-  rustyV8Archive = "librusty_v8_release_aarch64-apple-darwin.a.gz";
-  rustyV8CacheKey = "https___github_com_denoland_rusty_v8_releases_download_v150_4_0_librusty_v8_release_aarch64_apple_darwin_a_gz";
+  # The v8_enable_sandbox feature has no upstream rusty_v8 prebuilt archive.
+  # Codex publishes matching source-built archive/binding pairs for Cargo
+  # package builds. These must match v8 150.4.0 and the target exactly.
+  rustyV8ReleaseUrl = "https://github.com/openai/codex/releases/download/rusty-v8-v150.4.0";
   rustyV8Prebuilt = lib.optionalAttrs isAarch64Darwin {
-    "${rustyV8CacheKey}" = fetchurl {
-      url = "https://github.com/denoland/rusty_v8/releases/download/v150.4.0/${rustyV8Archive}";
-      hash = "sha256-zNj4FIW4IsWxiuun+d65KaM4LYasZzu/DzZvBod+axA=";
+    archive = fetchurl {
+      url = "${rustyV8ReleaseUrl}/librusty_v8_ptrcomp_sandbox_release_aarch64-apple-darwin.a.gz";
+      hash = "sha256-AK27SHmISMd1UEQcaGc6XoUpuOG3PqvN7iMss5tA9KE=";
+    };
+    binding = fetchurl {
+      url = "${rustyV8ReleaseUrl}/src_binding_ptrcomp_sandbox_release_aarch64-apple-darwin.rs";
+      hash = "sha256-ylrfDPicmnCtRgrnNkiy/om3SqETs8t/dXtqArdYOU8=";
     };
   };
 
 in
 rustPlatform.buildRustPackage (_: {
-  env.PKG_CONFIG_PATH = lib.makeSearchPathOutput "dev" "lib/pkgconfig" (
-    [ openssl ] ++ lib.optionals stdenv.isLinux [ libcap ]
-  );
+  env = {
+    PKG_CONFIG_PATH = lib.makeSearchPathOutput "dev" "lib/pkgconfig" (
+      [ openssl ] ++ lib.optionals stdenv.isLinux [ libcap ]
+    );
+  } // lib.optionalAttrs isAarch64Darwin {
+    RUSTY_V8_ARCHIVE = rustyV8Prebuilt.archive;
+    RUSTY_V8_SRC_BINDING_PATH = rustyV8Prebuilt.binding;
+  };
   pname = "codex-rs";
   inherit version;
   cargoLock.lockFile = ./Cargo.lock;
@@ -56,16 +61,6 @@ rustPlatform.buildRustPackage (_: {
   ] ++ lib.optionals stdenv.isLinux [
     libcap
   ];
-
-  preBuild = lib.optionalString isAarch64Darwin ''
-    # v8: stage the prebuilt static lib in the v8 build script's cache so it
-    # skips the GitHub download. CARGO_HOME is rewritten to a writable path
-    # inside the build sandbox; the build script reads it via home::cargo_home.
-    export CARGO_HOME="$NIX_BUILD_TOP/cargo-home"
-    mkdir -p "$CARGO_HOME/.rusty_v8"
-    cp ${rustyV8Prebuilt.${rustyV8CacheKey} or ""} \
-       "$CARGO_HOME/.rusty_v8/${rustyV8CacheKey}"
-  '';
 
   cargoLock.outputHashes = {
     "crossterm-0.29.0" = "sha256-cQxQQuV+YEutuQiPurXVISq6F/99vCEk8qe5PU8BCSo=";
