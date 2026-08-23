@@ -24,6 +24,11 @@
       cargoToml = builtins.fromTOML (builtins.readFile ./codex-rs/Cargo.toml);
       cargoVersion = cargoToml.workspace.package.version;
 
+      # Keep Nix builds on the same Rust toolchain as the workspace. Using
+      # stable.latest makes the selected compiler depend on the age of the
+      # locked rust-overlay input.
+      rustVersion = (builtins.fromTOML (builtins.readFile ./codex-rs/rust-toolchain.toml)).toolchain.channel;
+
       # When building from a release commit the Cargo.toml already carries the
       # real version (e.g. "0.101.0").  On the main branch it is the placeholder
       # "0.0.0", so we fall back to a dev version derived from the flake source.
@@ -39,11 +44,12 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
+          rust = pkgs.rust-bin.stable.${rustVersion}.minimal;
           codex-rs = pkgs.callPackage ./codex-rs {
             inherit version;
             rustPlatform = pkgs.makeRustPlatform {
-              cargo = pkgs.rust-bin.stable.latest.minimal;
-              rustc = pkgs.rust-bin.stable.latest.minimal;
+              cargo = rust;
+              rustc = rust;
             };
           };
         in
@@ -59,7 +65,7 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
-          rust = pkgs.rust-bin.stable.latest.default.override {
+          rust = pkgs.rust-bin.stable.${rustVersion}.default.override {
             extensions = [ "rust-src" "rust-analyzer" ];
           };
         in
