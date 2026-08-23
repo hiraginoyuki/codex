@@ -42,6 +42,7 @@ rustPlatform.buildRustPackage (_: {
   pname = "codex-rs";
   inherit version;
   cargoLock.lockFile = ./Cargo.lock;
+  cargoBuildFlags = [ "--package=codex-cli" ];
   doCheck = false;
   src = ./.;
 
